@@ -48,3 +48,14 @@ python -m unittest discover -s tests -v
 
 ### Development Workflow
 Each member works on their assigned Git branch. Changes are pushed and submitted through pull requests for review before merging into main.
+
+## Development Setup
+
+MeshWeaver uses Python's standard library for its core functionality.
+
+### Run Tests
+
+From the project root directory, run:
+
+```bash
+python -m unittest discover -s tests -v
