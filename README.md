@@ -20,16 +20,16 @@ MeshWeaver is a Python-based peer-to-peer asynchronous task broker.
 - logging
 
 ### Project Structure
-- `meshweaver/core` – Core functionality
-- `meshweaver/models` – Shared data models
-- `meshweaver/config` – Configuration
-- `meshweaver/storage` – Database
-- `meshweaver/network` – Peer communication
-- `meshweaver/broker` – Task scheduling
-- `meshweaver/worker` – Task execution
-- `meshweaver/cli` – Command-line interface
-- `tests` – Automated tests
-- `docs` – Documentation
+- meshweaver/core – Core functionality
+- meshweaver/models – Shared data models
+- meshweaver/config – Configuration
+- meshweaver/storage – Database
+- meshweaver/network – Peer communication
+- meshweaver/broker – Task scheduling
+- meshweaver/worker – Task execution
+- meshweaver/cli – Command-line interface
+- tests – Automated tests
+- docs – Documentation
 
 ### Team Responsibilities
 - Member 1: Network and P2P
@@ -41,10 +41,10 @@ MeshWeaver is a Python-based peer-to-peer asynchronous task broker.
 Python 3.11 or newer is required. No third-party runtime dependencies are planned.
 
 ### Run
-`python -m meshweaver.main`
+python -m meshweaver.main
 
 ### Testing
-`python -m unittest discover -s tests -v`
+python -m unittest discover -s tests -v
 
 ### Development Workflow
 Each member works on their assigned Git branch. Changes are pushed and submitted through pull requests for review before merging into main.
