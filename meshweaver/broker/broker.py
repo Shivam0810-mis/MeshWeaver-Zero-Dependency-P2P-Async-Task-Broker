@@ -1,14 +1,17 @@
 import asyncio
+import json
 from typing import Any, Dict, Optional
 
 from .models import Task
+from meshweaver.core.errors import StorageError
 
 
 class Broker:
-    def __init__(self):
+    def __init__(self, database=None):
         self._tasks: Dict[str, Task] = {}
         self._pending: asyncio.Queue = asyncio.Queue()
         self._submission_keys: Dict[str, str] = {}
+        self._database = database
 
     def submit_task(
         self,
@@ -24,6 +27,25 @@ class Broker:
             args=tuple(args),
             kwargs=dict(kwargs),
         )
+
+        # Persist first; only enqueue after successful storage.
+        if self._database is not None:
+            payload = json.dumps({
+                "args": task.args,
+                "kwargs": task.kwargs,
+            })
+
+            try:
+                self._database.add_task(
+                    task_id=task.task_id,
+                    task_type=task.name,
+                    payload=payload,
+                    status=task.status.value,
+                )
+            except Exception as exc:
+                raise StorageError(
+                    f"Could not persist task {task.task_id}: {exc}"
+                ) from exc
 
         self._tasks[task.task_id] = task
         self._pending.put_nowait(task.task_id)
@@ -66,7 +88,6 @@ class Broker:
         except asyncio.QueueEmpty:
             return None
 
-    
         self._pending.task_done()
 
         return self._tasks[task_id]
