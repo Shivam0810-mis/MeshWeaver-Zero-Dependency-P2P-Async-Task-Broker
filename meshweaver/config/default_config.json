@@ -1,0 +1,11 @@
+{
+    "node_id": "meshweaver-node-1",
+    "host": "127.0.0.1",
+    "port": 5000,
+    "peers": [],
+    "database_path": "meshweaver.db",
+    "max_concurrent_tasks": 5,
+    "heartbeat_interval": 30,
+    "max_message_bytes": 1048576,
+    "protocol_version": 1
+}
