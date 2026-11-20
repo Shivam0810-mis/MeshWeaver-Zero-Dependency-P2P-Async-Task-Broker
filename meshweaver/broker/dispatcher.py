@@ -58,6 +58,8 @@ class DispatchBroker(Broker):
         
         self._active[assignment.assignment_id] = assignment
         self._reservations[selected.peer_id] += 1
+
+        task.attempt_count += 1
         task.status = TaskStatus.ASSIGNING
 
         return assignment
