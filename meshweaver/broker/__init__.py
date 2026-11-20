@@ -17,9 +17,10 @@ from .models import (
     TaskStatus,
     TaskValidationError,
 )
-from .peers import PeerInfo
+from .peers import PeerHealth, PeerInfo
 from .queue import InMemoryTaskQueue
-from .scheduler import scheduler as Scheduler
+from .scheduler import LeastLoadedScheduler
+from .scheduler import Scheduler
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
@@ -30,6 +31,8 @@ __all__ = [
     "DispatchBroker",
     "InMemoryTaskQueue",
     "InvalidTaskTransitionError",
+    "LeastLoadedScheduler",
+    "PeerHealth",
     "PeerInfo",
     "PeerSelectorProtocol",
     "Scheduler",
