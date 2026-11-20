@@ -91,10 +91,11 @@ class DispatchBroker(Broker):
         self,
         *,
         node_id: str = "broker-local",
+        database: Any = None,
         scheduler: Optional[PeerSelectorProtocol] = None,
         queue: Optional[TaskQueueProtocol] = None,
     ) -> None:
-        super().__init__(queue=queue)
+        super().__init__(database=database, queue=queue)
         if not isinstance(node_id, str) or not node_id.strip():
             raise TaskValidationError("node_id must be a non-empty string.")
         self._node_id = node_id.strip()

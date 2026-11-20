@@ -1,8 +1,9 @@
-"""Core in-memory task broker: registration, validation, queue, and lookup."""
+"""Core in-memory task broker: registration, validation, queue, storage, and lookup."""
 
 import json
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from ..core.errors import StorageError
 from .interfaces import TaskQueueProtocol
 from .models import Task, TaskNotFoundError, TaskStatus, TaskValidationError
 from .queue import InMemoryTaskQueue
@@ -65,7 +66,7 @@ def _canonical_payload_fingerprint(
 
 
 class Broker:
-    """Manages task registration, validation, pending queue, and status queries.
+    """Manages task registration, validation, pending queue, optional storage, and lookup.
 
     Note on deduplication:
         ``submit_task_once`` / ``submission_key`` performs local in-memory
@@ -75,12 +76,17 @@ class Broker:
         brokers, or lost network acknowledgements (at-least-once semantics).
     """
 
-    def __init__(self, queue: Optional[TaskQueueProtocol] = None) -> None:
+    def __init__(
+        self,
+        database: Any = None,
+        queue: Optional[TaskQueueProtocol] = None,
+    ) -> None:
         self._tasks: Dict[str, Task] = {}
         self._queue: TaskQueueProtocol = (
             queue if queue is not None else InMemoryTaskQueue()
         )
         self._submission_keys: Dict[str, Tuple[str, str]] = {}
+        self._database = database
 
     def register_task(
         self,
@@ -91,7 +97,7 @@ class Broker:
         max_attempts: int = 3,
         submission_key: Optional[str] = None,
     ) -> Task:
-        """Validate, register, and enqueue a task with optional options."""
+        """Validate, persist (when configured), register, and enqueue a task."""
         if not isinstance(name, str) or not name.strip():
             raise TaskValidationError("Task name must be a non-empty string.")
         normalized_name = name.strip()
@@ -148,6 +154,28 @@ class Broker:
             max_attempts=max_attempts,
         )
 
+        # Persist first; only register and enqueue after successful storage.
+        if self._database is not None:
+            payload = json.dumps(
+                {
+                    "args": list(task.args),
+                    "kwargs": task.kwargs,
+                },
+                allow_nan=False,
+            )
+
+            try:
+                self._database.add_task(
+                    task_id=task.task_id,
+                    task_type=task.name,
+                    payload=payload,
+                    status=task.status.value,
+                )
+            except Exception as exc:
+                raise StorageError(
+                    f"Could not persist task {task.task_id}: {exc}"
+                ) from exc
+
         self._tasks[task.task_id] = task
         self._queue.enqueue(task.task_id)
 
@@ -166,7 +194,7 @@ class Broker:
         *args: Any,
         **kwargs: Any,
     ) -> Task:
-        """Validate, register, and enqueue a new task."""
+        """Validate, persist (when configured), register, and enqueue a task."""
         return self.register_task(name, args=args, kwargs=kwargs)
 
     def submit_task_once(
@@ -179,8 +207,9 @@ class Broker:
         """Submit a task idempotently for a given local submission key.
 
         Re-submitting the same key with an identical payload returns the
-        original ``Task`` without adding another queue entry. Re-submitting
-        the same key with a conflicting payload raises ``TaskValidationError``.
+        original ``Task`` without adding another queue or database entry.
+        Re-submitting the same key with a conflicting payload raises
+        ``TaskValidationError``.
         """
         if not isinstance(submission_key, str) or not submission_key.strip():
             raise TaskValidationError(
