@@ -35,3 +35,29 @@ async def test_unknown_handler():
 
     with pytest.raises(ValueError):
         await worker.execute_async("unknown", 10, 20)
+def test_empty_task_name():
+    worker = Worker()
+
+    with pytest.raises(ValueError):
+        worker.register_handler("", add)
+
+
+def test_whitespace_task_name():
+    worker = Worker()
+
+    with pytest.raises(ValueError):
+        worker.register_handler("   ", add)
+
+
+def test_invalid_task_name_type():
+    worker = Worker()
+
+    with pytest.raises(TypeError):
+        worker.register_handler(123, add)
+
+
+def test_non_callable_handler():
+    worker = Worker()
+
+    with pytest.raises(TypeError):
+        worker.register_handler("addition", 123)
