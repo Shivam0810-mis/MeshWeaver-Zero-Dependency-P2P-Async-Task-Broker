@@ -6,7 +6,6 @@ from pathlib import Path
 
 from meshweaver.broker.broker import Broker
 from meshweaver.broker.models import TaskStatus
-from meshweaver.broker.scheduler import scheduler
 from meshweaver.broker.peers import PeerInfo
 from meshweaver.storage.database import Database
 from worker.worker import Worker
@@ -45,24 +44,16 @@ class TestEndToEnd(unittest.TestCase):
             stored_task = db.get_task(task.task_id)
             self.assertEqual(stored_task["status"], TaskStatus.QUEUED.value)
 
-            # Dequeue task
-            dequeued_task = broker.dequeue_task()
-            self.assertEqual(dequeued_task.task_id, task.task_id)
+            # Assign task through the actual Broker integration
+            assignment = broker.assign_next_task([peer])
 
-            # Select peer
-            task_scheduler = scheduler()
-            selected_peer = task_scheduler.select_peer([peer])
+            self.assertIsNotNone(assignment)
 
-            self.assertIsNotNone(selected_peer)
+            assigned_task, selected_peer = assignment
+
+            self.assertEqual(assigned_task.task_id, task.task_id)
+            self.assertEqual(assigned_task.status, TaskStatus.ASSIGNED)
             self.assertEqual(selected_peer.peer_id, "peer-1")
-
-            # Assign task and persist status
-            task.status = TaskStatus.ASSIGNED
-            db.update_task(
-                task_id=task.task_id,
-                status=task.status.value,
-                assigned_peer_id=selected_peer.peer_id,
-            )
 
             stored_task = db.get_task(task.task_id)
             self.assertEqual(stored_task["status"], TaskStatus.ASSIGNED.value)
