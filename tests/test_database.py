@@ -1,3 +1,4 @@
+
 import sqlite3
 import tempfile
 import unittest
@@ -109,7 +110,32 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(task["status"], "completed")
         self.assertEqual(task["assigned_peer_id"], "peer-1")
         self.assertEqual(task["result"], '{"answer": 20}')
-    
+
+    def test_task_status_persists_after_database_restart(self):
+        self.db.add_peer("peer-1", "127.0.0.1", 5000)
+
+        self.db.add_task(
+            "task-restart",
+            "calculation",
+            '{"value": 10}'
+        )
+
+        self.db.update_task(
+            "task-restart",
+            "assigned",
+            assigned_peer_id="peer-1"
+        )
+
+        # Simulate application restart by creating a new Database instance
+        restarted_db = Database(self.db.database_path)
+        restarted_db.initialize()
+
+        task = restarted_db.get_task("task-restart")
+
+        self.assertIsNotNone(task)
+        self.assertEqual(task["status"], "assigned")
+        self.assertEqual(task["assigned_peer_id"], "peer-1")
+
     def test_delete_task(self):
         self.db.add_task("task-1", "calculation", '{"value": 10}')
 
@@ -117,7 +143,6 @@ class TestDatabase(unittest.TestCase):
 
         self.assertTrue(deleted)
         self.assertIsNone(self.db.get_task("task-1"))
-
 
     # Migration tests
 
@@ -154,7 +179,7 @@ class TestDatabase(unittest.TestCase):
 
         self.assertIsNotNone(self.db.get_peer("peer-migration"))
         self.assertIsNotNone(self.db.get_task("task-migration"))
-    
+
     def test_initialize_applies_new_migration(self):
         class DatabaseWithV2(Database):
             def _get_migrations(self):
@@ -221,7 +246,7 @@ class TestDatabase(unittest.TestCase):
             self.assertEqual(version, 1)
         finally:
             connection.close()
-            
-    
+
+
 if __name__ == "__main__":
     unittest.main()
