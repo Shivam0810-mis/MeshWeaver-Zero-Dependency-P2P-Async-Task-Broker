@@ -1,7 +1,7 @@
 from dataclasses import dataclass , field
 from datetime import datetime ,timezone
 from enum import Enum
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple , Optional
 from uuid import uuid4
 
 
@@ -33,7 +33,11 @@ class Task:
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc),
         init=False,
-    )    
+    )
+
+    attempt_count: int = field(default=0, init=False)
+    max_attempts: int = field(default=3, init=False)
+    last_error: Optional[str] = field(default=None, init=False)    
 
 
 
