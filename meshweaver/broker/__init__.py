@@ -18,6 +18,7 @@ from .models import (
     TaskValidationError,
 )
 from .peers import PeerInfo
+from .queue import InMemoryTaskQueue
 from .scheduler import scheduler as Scheduler
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "Broker",
     "BrokerProtocol",
     "DispatchBroker",
+    "InMemoryTaskQueue",
     "InvalidTaskTransitionError",
     "PeerInfo",
     "PeerSelectorProtocol",

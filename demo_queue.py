@@ -55,7 +55,7 @@ def main():
 
     again = broker.submit_task_once(
         "request-101",
-        "add_numbers",
+        "add_number",
         10,
         20,
     )
