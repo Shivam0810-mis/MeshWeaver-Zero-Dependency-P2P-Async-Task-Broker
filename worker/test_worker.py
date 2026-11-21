@@ -1,6 +1,7 @@
 
 import pytest
 from worker.worker import Worker
+from worker.result import WorkerResult
 
 def add(a, b):
     return a + b
@@ -61,3 +62,25 @@ def test_non_callable_handler():
 
     with pytest.raises(TypeError):
         worker.register_handler("addition", 123)
+def test_handler_registration():
+    worker = Worker()
+
+    worker.register_handler("addition", add)
+
+    assert "addition" in worker.handlers
+    assert worker.handlers["addition"] == add
+
+
+def test_registered_handler_execution():
+    worker = Worker()
+
+    worker.register_handler("addition", add)
+
+    result = worker.execute("addition", 10, 20)
+
+    assert result == 30
+def test_worker_result():
+    output = WorkerResult("addition", 30)
+
+    assert output.task_name == "addition"
+    assert output.result == 30
