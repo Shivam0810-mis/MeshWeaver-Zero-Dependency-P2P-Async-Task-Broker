@@ -1,7 +1,7 @@
 
 import pytest
 import json
-
+import asyncio
 from worker.worker import Worker
 from worker.result import WorkerResult
 
@@ -151,3 +151,44 @@ def test_failed_worker_result():
     assert output.success is False
     assert output.result is None
     assert output.error == "Division by zero"
+async def test_worker_dispatch():
+    worker = Worker()
+    worker.register_handler("addition", add)
+
+    task = {
+        "task_name": "addition",
+        "args": [10, 20]
+    }
+
+    result = await worker.dispatch(task)
+
+    assert result.task_name == "addition"
+    assert result.success is True
+    assert result.result == 30
+    assert result.error is None
+async def test_worker_receive_loop():
+    worker = Worker()
+    worker.register_handler("addition", add)
+
+    runner = asyncio.create_task(worker.run())
+
+    await worker.receive_task({
+        "task_name": "addition",
+        "args": [10, 20]
+    })
+
+    await worker.receive_task({
+        "task_name": "addition",
+        "args": [5, 15]
+    })
+
+    await worker.task_queue.join()
+
+    assert len(worker.results) == 2
+    assert worker.results[0].result == 30
+    assert worker.results[1].result == 20
+
+    runner.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner

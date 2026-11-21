@@ -1,8 +1,10 @@
 import asyncio
-
+from worker.result import WorkerResult
 class Worker:
     def __init__(self):
         self.handlers = {}
+        self.task_queue=asyncio.Queue()
+        self.results=[]
     def validate_task_name(self, task_name):
         if not isinstance(task_name, str):
             raise TypeError("Task name must be a string")
@@ -37,4 +39,25 @@ class Worker:
             return await function(*args)
 
         return function(*args)
+    async def dispatch(self, task):
+        task_name = task["task_name"]
+        args = task.get("args", [])
+
+        result = await self.execute_async(task_name, *args)
+
+        return WorkerResult(
+            task_name,
+            result=result
+        )
+    async def receive_task(self, task):
+        await self.task_queue.put(task)
+    async def run(self):
+        while True:
+            task = await self.task_queue.get()
+
+            try:
+                result = await self.dispatch(task)
+                self.results.append(result)
+            finally:
+                self.task_queue.task_done()
     
