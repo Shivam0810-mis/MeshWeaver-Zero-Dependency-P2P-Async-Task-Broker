@@ -1,12 +1,15 @@
+
 import asyncio
+
 
 class Worker:
     def __init__(self):
         self.handlers = {}
+
     def validate_task_name(self, task_name):
         if not isinstance(task_name, str):
             raise TypeError("Task name must be a string")
-    
+
         if not task_name.strip():
             raise ValueError("Task name cannot be empty")
 
@@ -20,6 +23,7 @@ class Worker:
 
     def execute(self, task_name, *args):
         self.validate_task_name(task_name)
+
         if task_name not in self.handlers:
             raise ValueError("Handler not found")
 
@@ -28,6 +32,7 @@ class Worker:
 
     async def execute_async(self, task_name, *args):
         self.validate_task_name(task_name)
+
         if task_name not in self.handlers:
             raise ValueError("Handler not found")
 
@@ -37,4 +42,3 @@ class Worker:
             return await function(*args)
 
         return function(*args)
-    

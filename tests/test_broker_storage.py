@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from meshweaver.broker.broker import Broker
+from meshweaver.broker.models import TaskStatus
+from meshweaver.broker.peers import PeerInfo
 from meshweaver.core.errors import StorageError
 from meshweaver.storage.database import Database
 
@@ -67,6 +69,80 @@ class TestBrokerStorage(unittest.TestCase):
 
         self.assertEqual(broker.task_count(), 0)
         self.assertEqual(broker.pending_count(), 0)
+
+    def test_task_lifecycle_persists_all_status_updates(self):
+        # Register peer in database
+        self.db.add_peer(
+            peer_id="peer-1",
+            host="127.0.0.1",
+            port=5001,
+            status="online",
+        )
+
+        peer = PeerInfo(
+            peer_id="peer-1",
+            cpu_usage=20,
+            running_tasks=0,
+            max_tasks=5,
+            is_online=True,
+        )
+
+        # Submit task
+        task = self.broker.submit_task("add_numbers", 10, 20)
+
+        stored_task = self.db.get_task(task.task_id)
+        self.assertEqual(
+            stored_task["status"],
+            TaskStatus.QUEUED.value,
+        )
+
+        # Assign task through Broker
+        assignment = self.broker.assign_next_task([peer])
+
+        self.assertIsNotNone(assignment)
+
+        assigned_task, selected_peer = assignment
+
+        self.assertEqual(assigned_task.task_id, task.task_id)
+        self.assertEqual(selected_peer.peer_id, "peer-1")
+
+        stored_task = self.db.get_task(task.task_id)
+
+        self.assertEqual(
+            stored_task["status"],
+            TaskStatus.ASSIGNED.value,
+        )
+        self.assertEqual(stored_task["assigned_peer_id"], "peer-1")
+
+        # Update task to RUNNING
+        self.db.update_task(
+            task_id=task.task_id,
+            status=TaskStatus.RUNNING.value,
+        )
+
+        stored_task = self.db.get_task(task.task_id)
+
+        self.assertEqual(
+            stored_task["status"],
+            TaskStatus.RUNNING.value,
+        )
+
+        # Update task to COMPLETED and save result
+        self.db.update_task(
+            task_id=task.task_id,
+            status=TaskStatus.COMPLETED.value,
+            result=json.dumps(30),
+        )
+
+        # Verify final persisted state
+        stored_task = self.db.get_task(task.task_id)
+
+        self.assertEqual(
+            stored_task["status"],
+            TaskStatus.COMPLETED.value,
+        )
+        self.assertEqual(stored_task["assigned_peer_id"], "peer-1")
+        self.assertEqual(json.loads(stored_task["result"]), 30)
 
 
 if __name__ == "__main__":

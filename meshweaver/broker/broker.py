@@ -1,4 +1,5 @@
-"""Core in-memory task broker: registration, validation, queue, storage, and lookup."""
+
+"""Core task broker with scheduling, storage, validation, and lookup."""
 
 import json
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -7,12 +8,14 @@ from ..core.errors import StorageError
 from .interfaces import TaskQueueProtocol
 from .models import Task, TaskNotFoundError, TaskStatus, TaskValidationError
 from .queue import InMemoryTaskQueue
+from .scheduler import scheduler
 
 
 def _validate_json_value(value: Any, path: str) -> None:
-    """Ensure ``value`` is strictly JSON-compatible (no non-string dict keys)."""
+    """Ensure value is strictly JSON-compatible."""
     if value is None or isinstance(value, (bool, int, str)):
         return
+
     if isinstance(value, float):
         try:
             json.dumps(value, allow_nan=False)
@@ -21,18 +24,22 @@ def _validate_json_value(value: Any, path: str) -> None:
                 f"Non-finite float not allowed in JSON task payload at {path}."
             ) from exc
         return
+
     if isinstance(value, (list, tuple)):
         for index, item in enumerate(value):
             _validate_json_value(item, f"{path}[{index}]")
         return
+
     if isinstance(value, dict):
         for key, item in value.items():
             if not isinstance(key, str):
                 raise TaskValidationError(
-                    f"JSON object keys must be strings at {path}; got {type(key).__name__}."
+                    f"JSON object keys must be strings at {path}; "
+                    f"got {type(key).__name__}."
                 )
             _validate_json_value(item, f"{path}.{key}")
         return
+
     raise TaskValidationError(
         f"Unsupported non-JSON value of type {type(value).__name__} at {path}."
     )
@@ -44,9 +51,10 @@ def _canonical_payload_fingerprint(
     kwargs: Dict[str, Any],
     max_attempts: int,
 ) -> str:
-    """Validate JSON compatibility and return a canonical payload fingerprint."""
+    """Validate JSON compatibility and return a canonical fingerprint."""
     _validate_json_value(args, "args")
     _validate_json_value(kwargs, "kwargs")
+
     try:
         return json.dumps(
             {
@@ -80,6 +88,7 @@ class Broker:
         self,
         database: Any = None,
         queue: Optional[TaskQueueProtocol] = None,
+        task_scheduler: Any = None,
     ) -> None:
         self._tasks: Dict[str, Task] = {}
         self._queue: TaskQueueProtocol = (
@@ -87,6 +96,9 @@ class Broker:
         )
         self._submission_keys: Dict[str, Tuple[str, str]] = {}
         self._database = database
+        self._scheduler = (
+            task_scheduler if task_scheduler is not None else scheduler()
+        )
 
     def register_task(
         self,
@@ -97,15 +109,20 @@ class Broker:
         max_attempts: int = 3,
         submission_key: Optional[str] = None,
     ) -> Task:
-        """Validate, persist (when configured), register, and enqueue a task."""
+        """Validate, persist, register, and enqueue a task."""
+
         if not isinstance(name, str) or not name.strip():
-            raise TaskValidationError("Task name must be a non-empty string.")
+            raise TaskValidationError(
+                "Task name must be a non-empty string."
+            )
+
         normalized_name = name.strip()
 
         if isinstance(args, (str, bytes, dict)):
             raise TaskValidationError(
                 "Task args must be a positional sequence (tuple or list)."
             )
+
         try:
             normalized_args = tuple(args)
         except TypeError as exc:
@@ -113,14 +130,23 @@ class Broker:
                 "Task args must be an iterable of positional arguments."
             ) from exc
 
-        normalized_kwargs: Dict[str, Any] = (
-            {} if kwargs is None else dict(kwargs)
-        ) if isinstance(kwargs, (dict, type(None))) else self._raise_invalid_kwargs()
+        if kwargs is None:
+            normalized_kwargs: Dict[str, Any] = {}
+        elif isinstance(kwargs, dict):
+            normalized_kwargs = dict(kwargs)
+        else:
+            raise TaskValidationError(
+                "Task kwargs must be a dictionary."
+            )
 
-        if isinstance(max_attempts, bool) or not isinstance(
-            max_attempts, int
-        ) or max_attempts < 1:
-            raise TaskValidationError("max_attempts must be an integer >= 1.")
+        if (
+            isinstance(max_attempts, bool)
+            or not isinstance(max_attempts, int)
+            or max_attempts < 1
+        ):
+            raise TaskValidationError(
+                "max_attempts must be an integer >= 1."
+            )
 
         fingerprint = _canonical_payload_fingerprint(
             normalized_name,
@@ -130,21 +156,29 @@ class Broker:
         )
 
         normalized_key: Optional[str] = None
+
         if submission_key is not None:
-            if not isinstance(submission_key, str) or not submission_key.strip():
+            if (
+                not isinstance(submission_key, str)
+                or not submission_key.strip()
+            ):
                 raise TaskValidationError(
                     "Submission key must be a non-empty string."
                 )
+
             normalized_key = submission_key.strip()
 
             existing_entry = self._submission_keys.get(normalized_key)
+
             if existing_entry is not None:
                 existing_task_id, existing_fingerprint = existing_entry
+
                 if existing_fingerprint != fingerprint:
                     raise TaskValidationError(
-                        f"Submission key {normalized_key!r} was already used "
-                        "with a different task payload."
+                        f"Submission key {normalized_key!r} was already "
+                        "used with a different task payload."
                     )
+
                 return self._tasks[existing_task_id]
 
         task = Task(
@@ -154,7 +188,7 @@ class Broker:
             max_attempts=max_attempts,
         )
 
-        # Persist first; only register and enqueue after successful storage.
+        # Persist before registering and enqueueing.
         if self._database is not None:
             payload = json.dumps(
                 {
@@ -180,13 +214,12 @@ class Broker:
         self._queue.enqueue(task.task_id)
 
         if normalized_key is not None:
-            self._submission_keys[normalized_key] = (task.task_id, fingerprint)
+            self._submission_keys[normalized_key] = (
+                task.task_id,
+                fingerprint,
+            )
 
         return task
-
-    @staticmethod
-    def _raise_invalid_kwargs() -> Dict[str, Any]:
-        raise TaskValidationError("Task kwargs must be a dictionary.")
 
     def submit_task(
         self,
@@ -194,8 +227,12 @@ class Broker:
         *args: Any,
         **kwargs: Any,
     ) -> Task:
-        """Validate, persist (when configured), register, and enqueue a task."""
-        return self.register_task(name, args=args, kwargs=kwargs)
+        """Submit a task."""
+        return self.register_task(
+            name,
+            args=args,
+            kwargs=kwargs,
+        )
 
     def submit_task_once(
         self,
@@ -204,17 +241,16 @@ class Broker:
         *args: Any,
         **kwargs: Any,
     ) -> Task:
-        """Submit a task idempotently for a given local submission key.
+        """Submit a task idempotently using a local submission key."""
 
-        Re-submitting the same key with an identical payload returns the
-        original ``Task`` without adding another queue or database entry.
-        Re-submitting the same key with a conflicting payload raises
-        ``TaskValidationError``.
-        """
-        if not isinstance(submission_key, str) or not submission_key.strip():
+        if (
+            not isinstance(submission_key, str)
+            or not submission_key.strip()
+        ):
             raise TaskValidationError(
                 "Submission key must be a non-empty string."
             )
+
         return self.register_task(
             name,
             args=args,
@@ -223,69 +259,137 @@ class Broker:
         )
 
     def get_task(self, task_id: str) -> Task:
-        """Return a registered task by ID or raise ``TaskNotFoundError``."""
+        """Return a task by ID."""
         if task_id not in self._tasks:
-            raise TaskNotFoundError(f"Task not found: {task_id}")
+            raise TaskNotFoundError(
+                f"Task not found: {task_id}"
+            )
+
         return self._tasks[task_id]
 
     def has_task(self, task_id: str) -> bool:
-        """Return True if ``task_id`` is registered in the broker."""
+        """Check whether a task exists."""
         return task_id in self._tasks
 
     def get_task_status(self, task_id: str) -> TaskStatus:
-        """Return the current ``TaskStatus`` for ``task_id``."""
+        """Return task status."""
         return self.get_task(task_id).status
 
     def get_task_summary(self, task_id: str) -> Dict[str, Any]:
-        """Return a JSON-compatible dictionary summary of ``task_id``."""
+        """Return task summary."""
         return self.get_task(task_id).to_dict()
 
     def list_tasks(
         self,
         status: Optional[TaskStatus] = None,
     ) -> List[Task]:
-        """Return registered tasks, optionally filtered by lifecycle status."""
+        """Return all tasks, optionally filtered by status."""
+
         if status is None:
             return list(self._tasks.values())
+
         if not isinstance(status, TaskStatus):
-            raise TaskValidationError(f"Invalid status filter: {status!r}")
+            raise TaskValidationError(
+                f"Invalid status filter: {status!r}"
+            )
+
         return [
-            task for task in self._tasks.values() if task.status == status
+            task
+            for task in self._tasks.values()
+            if task.status == status
         ]
 
     def dequeue_task(self) -> Optional[Task]:
-        """Dequeue and return the next pending task, or None if queue is empty."""
+        """Dequeue the next pending task."""
+
         task_id = self._queue.dequeue_nowait()
+
         if task_id is None:
             return None
+
         return self._tasks[task_id]
 
     async def wait_for_task(self) -> Task:
-        """Await and return the next pending task from the broker queue."""
+        """Wait asynchronously for the next pending task."""
+
         task_id = await self._queue.dequeue()
         return self._tasks[task_id]
 
-    def requeue_task(self, task_id: str, *, front: bool = False) -> None:
-        """Re-enqueue a registered ``QUEUED`` task without losing work."""
+    def requeue_task(
+        self,
+        task_id: str,
+        *,
+        front: bool = False,
+    ) -> None:
+        """Re-enqueue a registered QUEUED task."""
+
         task = self.get_task(task_id)
+
         if task.status != TaskStatus.QUEUED:
             raise TaskValidationError(
-                f"Only QUEUED tasks can be requeued; task {task_id} is "
-                f"{task.status.value}."
+                f"Only QUEUED tasks can be requeued; "
+                f"task {task_id} is {task.status.value}."
             )
-        if isinstance(self._queue, InMemoryTaskQueue) and self._queue.contains(
-            task_id
+
+        if (
+            isinstance(self._queue, InMemoryTaskQueue)
+            and self._queue.contains(task_id)
         ):
             return
+
         if front:
             self._queue.requeue_front(task_id)
         else:
             self._queue.enqueue(task_id)
 
+    def assign_next_task(self, peers):
+        """Assign the next pending task to an eligible peer."""
+
+        task = self.dequeue_task()
+
+        if task is None:
+            return None
+
+        try:
+            selected_peer = self._scheduler.select_peer(peers)
+        except Exception:
+            self.requeue_task(task.task_id, front=True)
+            raise
+
+        if selected_peer is None:
+            self.requeue_task(task.task_id, front=True)
+            return None
+
+        previous_status = task.status
+        task.status = TaskStatus.ASSIGNED
+
+        if self._database is not None:
+            try:
+                updated = self._database.update_task(
+                    task_id=task.task_id,
+                    status=task.status.value,
+                    assigned_peer_id=selected_peer.peer_id,
+                )
+
+                if not updated:
+                    raise ValueError(
+                        "Task record not found in database."
+                    )
+
+            except Exception as exc:
+                task.status = previous_status
+                self.requeue_task(task.task_id, front=True)
+
+                raise StorageError(
+                    f"Could not assign task {task.task_id}: {exc}"
+                ) from exc
+
+        return task, selected_peer
+
     def task_count(self) -> int:
-        """Return total number of registered tasks."""
+        """Return total registered task count."""
         return len(self._tasks)
 
     def pending_count(self) -> int:
-        """Return number of tasks currently waiting in the pending queue."""
+        """Return pending queue size."""
         return self._queue.size()
