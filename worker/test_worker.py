@@ -192,3 +192,42 @@ async def test_worker_receive_loop():
 
     with pytest.raises(asyncio.CancelledError):
         await runner
+
+
+@pytest.mark.asyncio
+async def test_worker_respects_concurrency_limit():
+    worker = Worker(max_concurrency=2)
+
+    active_tasks = 0
+    max_active_tasks = 0
+
+    async def slow_task():
+        nonlocal active_tasks, max_active_tasks
+
+        active_tasks += 1
+        max_active_tasks = max(max_active_tasks, active_tasks)
+
+        await asyncio.sleep(0.1)
+
+        active_tasks -= 1
+        return "completed"
+
+    worker.register_handler("slow", slow_task)
+
+    runner = asyncio.create_task(worker.run())
+
+    for _ in range(5):
+        await worker.receive_task({
+            "task_name": "slow",
+            "args": []
+        })
+
+    await worker.task_queue.join()
+
+    runner.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner
+
+    assert len(worker.results) == 5
+    assert max_active_tasks == 2
