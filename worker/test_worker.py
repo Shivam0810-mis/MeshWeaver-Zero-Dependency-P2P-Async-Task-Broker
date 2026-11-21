@@ -1,5 +1,6 @@
 
 import pytest
+import json
 from worker.worker import Worker
 from worker.result import WorkerResult
 
@@ -84,3 +85,21 @@ def test_worker_result():
 
     assert output.task_name == "addition"
     assert output.result == 30
+def test_worker_result_to_dict():
+    output = WorkerResult("addition", 30)
+
+    expected = {
+        "task_name": "addition",
+        "result": 30
+    }
+
+    assert output.to_dict() == expected
+
+
+def test_worker_result_to_json():
+    output = WorkerResult("addition", 30)
+
+    result = json.loads(output.to_json())
+
+    assert result["task_name"] == "addition"
+    assert result["result"] == 30
