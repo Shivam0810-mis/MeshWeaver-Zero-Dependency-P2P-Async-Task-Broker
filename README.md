@@ -57,6 +57,18 @@ python -m meshweaver.main
 
 MeshWeaver uses Python's standard library for its core functionality.
 
+### Install Optional Testing Tools
+
+The core MeshWeaver application uses only Python's standard library.
+
+For running async tests with pytest, install the optional testing tools:
+
+```bash
+python -m pip install pytest pytest-asyncio
+```
+
+These packages are required only for development and testing, not for runtime execution.
+
 ### Run Tests
 
 From the project root directory, run:
