@@ -1,12 +1,15 @@
 import asyncio
 import json
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from meshweaver.broker import (
     Broker,
     BrokerProtocol,
+    DispatchBroker,
     InMemoryTaskQueue,
     InvalidTaskTransitionError,
+    PeerInfo,
     TaskNotFoundError,
     TaskQueueProtocol,
     TaskStatus,
@@ -262,6 +265,126 @@ class TestTaskLifecycleTransitions(unittest.TestCase):
         for status in TaskStatus:
             with self.assertRaises(InvalidTaskTransitionError):
                 task.transition_to(status)
+
+
+class TestBrokerLifecycleEdgeCases(unittest.TestCase):
+    def test_empty_and_whitespace_names_and_submission_keys_rejected(self):
+        broker = Broker()
+
+        for bad_name in ("", "   ", "\t\n"):
+            with self.assertRaises(ValueError):
+                broker.submit_task(bad_name, 1, 2)
+
+        for bad_key in ("", "   ", "\n"):
+            with self.assertRaises(ValueError):
+                broker.submit_task_once(bad_key, "add", 1, 2)
+
+        self.assertEqual(broker.task_count(), 0)
+        self.assertEqual(broker.pending_count(), 0)
+
+    def test_dequeue_empty_and_drained_queue_returns_none(self):
+        broker = Broker()
+        self.assertIsNone(broker.dequeue_task())
+
+        task = broker.submit_task("single_job", 1)
+        self.assertIs(broker.dequeue_task(), task)
+        self.assertEqual(broker.pending_count(), 0)
+        self.assertIsNone(broker.dequeue_task())
+
+    def test_requeue_edge_cases_back_unknown_and_terminal_tasks(self):
+        broker = Broker()
+        t1 = broker.submit_task("first")
+        t2 = broker.submit_task("second")
+
+        self.assertIs(broker.dequeue_task(), t1)
+        broker.requeue_task(t1.task_id, front=False)
+        self.assertIs(broker.dequeue_task(), t2)
+        self.assertIs(broker.dequeue_task(), t1)
+
+        with self.assertRaises(TaskNotFoundError):
+            broker.requeue_task("unknown-task-id")
+
+        for terminal_status in (
+            TaskStatus.EXPIRED,
+            TaskStatus.FAILED,
+        ):
+            t = broker.submit_task(f"term_{terminal_status.value}")
+            broker.dequeue_task()
+            t.transition_to(terminal_status)
+            with self.assertRaises(TaskValidationError):
+                broker.requeue_task(t.task_id)
+
+    def test_assign_next_task_skips_expired_and_handles_empty_queue(self):
+        now = datetime(2026, 11, 22, 12, 0, 0, tzinfo=timezone.utc)
+        broker = Broker(clock=lambda: now)
+        peer = PeerInfo("peer-1", cpu_usage=15, running_tasks=0, max_tasks=2)
+
+        self.assertIsNone(broker.assign_next_task([peer]))
+
+        expired = broker.submit_task_with_deadline(
+            now - timedelta(seconds=1),
+            "expired_job",
+        )
+        self.assertEqual(expired.status, TaskStatus.EXPIRED)
+        self.assertIsNone(broker.assign_next_task([peer]))
+
+        valid = broker.submit_task_with_deadline(
+            now + timedelta(minutes=5),
+            "valid_job",
+        )
+        assigned = broker.assign_next_task([peer])
+        self.assertIsNotNone(assigned)
+        assigned_task, selected_peer = assigned
+        self.assertEqual(assigned_task.task_id, valid.task_id)
+        self.assertEqual(selected_peer.peer_id, "peer-1")
+        self.assertEqual(valid.status, TaskStatus.ASSIGNED)
+
+    def test_register_task_submission_key_detects_deadline_conflict(self):
+        now = datetime(2026, 11, 22, 12, 0, 0, tzinfo=timezone.utc)
+        broker = Broker(clock=lambda: now)
+        d1 = now + timedelta(minutes=5)
+        d2 = now + timedelta(minutes=10)
+
+        t1 = broker.register_task("job", args=(1,), deadline_at=d1, submission_key="k-dl")
+        t1_same = broker.register_task("job", args=(1,), deadline_at=d1, submission_key="k-dl")
+        self.assertIs(t1, t1_same)
+
+        with self.assertRaises(TaskValidationError):
+            broker.register_task("job", args=(1,), deadline_at=d2, submission_key="k-dl")
+
+    def test_dispatch_broker_ack_complete_and_multi_slot_reservations(self):
+        broker = DispatchBroker()
+        t1 = broker.submit_task("job_1")
+        t2 = broker.submit_task("job_2")
+        peers = [PeerInfo("peer-1", cpu_usage=10, running_tasks=0, max_tasks=2)]
+
+        a1 = broker.assign_next(peers)
+        a2 = broker.assign_next(peers)
+        self.assertIsNotNone(a1)
+        self.assertIsNotNone(a2)
+        self.assertEqual(broker.reservation_count("peer-1"), 2)
+
+        # Cannot complete before ACK (while ASSIGNING).
+        self.assertFalse(broker.complete(a1.assignment_id, "peer-1"))
+        self.assertEqual(t1.status, TaskStatus.ASSIGNING)
+        self.assertEqual(broker.reservation_count("peer-1"), 2)
+
+        # Wrong peer or unknown assignment rejected for mark_running.
+        self.assertTrue(broker.acknowledge(a1.assignment_id, "peer-1"))
+        self.assertFalse(broker.mark_running(a1.assignment_id, "peer-other"))
+        self.assertFalse(broker.mark_running("missing-assignment", "peer-1"))
+
+        # Direct ASSIGNED -> COMPLETED without mark_running succeeds once.
+        self.assertTrue(broker.complete(a1.assignment_id, "peer-1"))
+        self.assertEqual(t1.status, TaskStatus.COMPLETED)
+        self.assertEqual(broker.reservation_count("peer-1"), 1)
+
+        # Second task completes via ASSIGNED -> RUNNING -> COMPLETED.
+        self.assertTrue(broker.acknowledge(a2.assignment_id, "peer-1"))
+        self.assertTrue(broker.mark_running(a2.assignment_id, "peer-1"))
+        self.assertTrue(broker.complete(a2.assignment_id, "peer-1"))
+        self.assertEqual(t2.status, TaskStatus.COMPLETED)
+        self.assertEqual(broker.reservation_count("peer-1"), 0)
 
 
 if __name__ == "__main__":
