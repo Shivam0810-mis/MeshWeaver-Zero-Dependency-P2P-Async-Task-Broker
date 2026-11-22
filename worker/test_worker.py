@@ -1,7 +1,7 @@
 
 import pytest
 import json
-
+import asyncio
 from worker.worker import Worker
 from worker.result import WorkerResult
 
@@ -151,3 +151,83 @@ def test_failed_worker_result():
     assert output.success is False
     assert output.result is None
     assert output.error == "Division by zero"
+async def test_worker_dispatch():
+    worker = Worker()
+    worker.register_handler("addition", add)
+
+    task = {
+        "task_name": "addition",
+        "args": [10, 20]
+    }
+
+    result = await worker.dispatch(task)
+
+    assert result.task_name == "addition"
+    assert result.success is True
+    assert result.result == 30
+    assert result.error is None
+async def test_worker_receive_loop():
+    worker = Worker()
+    worker.register_handler("addition", add)
+
+    runner = asyncio.create_task(worker.run())
+
+    await worker.receive_task({
+        "task_name": "addition",
+        "args": [10, 20]
+    })
+
+    await worker.receive_task({
+        "task_name": "addition",
+        "args": [5, 15]
+    })
+
+    await worker.task_queue.join()
+
+    assert len(worker.results) == 2
+    assert worker.results[0].result == 30
+    assert worker.results[1].result == 20
+
+    runner.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner
+
+
+@pytest.mark.asyncio
+async def test_worker_respects_concurrency_limit():
+    worker = Worker(max_concurrency=2)
+
+    active_tasks = 0
+    max_active_tasks = 0
+
+    async def slow_task():
+        nonlocal active_tasks, max_active_tasks
+
+        active_tasks += 1
+        max_active_tasks = max(max_active_tasks, active_tasks)
+
+        await asyncio.sleep(0.1)
+
+        active_tasks -= 1
+        return "completed"
+
+    worker.register_handler("slow", slow_task)
+
+    runner = asyncio.create_task(worker.run())
+
+    for _ in range(5):
+        await worker.receive_task({
+            "task_name": "slow",
+            "args": []
+        })
+
+    await worker.task_queue.join()
+
+    runner.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner
+
+    assert len(worker.results) == 5
+    assert max_active_tasks == 2
