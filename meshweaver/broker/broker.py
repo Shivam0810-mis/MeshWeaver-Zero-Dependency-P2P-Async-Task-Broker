@@ -1,12 +1,18 @@
-
-"""Core task broker with scheduling, storage, validation, and lookup."""
+"""Core task broker with scheduling, storage, validation, deadlines, and lookup."""
 
 import json
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from ..core.errors import StorageError
 from .interfaces import TaskQueueProtocol
-from .models import Task, TaskNotFoundError, TaskStatus, TaskValidationError
+from .models import (
+    Task,
+    TaskNotFoundError,
+    TaskStatus,
+    TaskValidationError,
+    normalize_deadline,
+)
 from .queue import InMemoryTaskQueue
 from .scheduler import scheduler
 
@@ -50,6 +56,7 @@ def _canonical_payload_fingerprint(
     args: Tuple[Any, ...],
     kwargs: Dict[str, Any],
     max_attempts: int,
+    deadline_at: Optional[datetime] = None,
 ) -> str:
     """Validate JSON compatibility and return a canonical fingerprint."""
     _validate_json_value(args, "args")
@@ -62,6 +69,9 @@ def _canonical_payload_fingerprint(
                 "args": list(args),
                 "kwargs": kwargs,
                 "max_attempts": max_attempts,
+                "deadline_at": (
+                    deadline_at.isoformat() if deadline_at is not None else None
+                ),
             },
             allow_nan=False,
             sort_keys=True,
@@ -74,7 +84,7 @@ def _canonical_payload_fingerprint(
 
 
 class Broker:
-    """Manages task registration, validation, pending queue, optional storage, and lookup.
+    """Manages task registration, validation, deadlines, pending queue, storage, and lookup.
 
     Note on deduplication:
         ``submit_task_once`` / ``submission_key`` performs local in-memory
@@ -89,6 +99,7 @@ class Broker:
         database: Any = None,
         queue: Optional[TaskQueueProtocol] = None,
         task_scheduler: Any = None,
+        clock: Optional[Callable[[], datetime]] = None,
     ) -> None:
         self._tasks: Dict[str, Task] = {}
         self._queue: TaskQueueProtocol = (
@@ -99,6 +110,52 @@ class Broker:
         self._scheduler = (
             task_scheduler if task_scheduler is not None else scheduler()
         )
+        self._clock: Callable[[], datetime] = (
+            clock if clock is not None else (lambda: datetime.now(timezone.utc))
+        )
+
+    def _utc_now(self) -> datetime:
+        return normalize_deadline(self._clock())
+
+    def _expire_task_if_due(
+        self,
+        task: Task,
+        *,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """Expire a non-terminal task if its deadline has passed.
+
+        Returns True when the task is expired (either already EXPIRED or
+        transitioned to EXPIRED by this call).
+        """
+        if task.status == TaskStatus.EXPIRED:
+            return True
+        if task.is_terminal or task.deadline_at is None:
+            return False
+
+        current_time = (
+            self._utc_now() if now is None else normalize_deadline(now)
+        )
+        if current_time < task.deadline_at:
+            return False
+
+        task.transition_to(
+            TaskStatus.EXPIRED,
+            error="Task deadline expired.",
+        )
+
+        if self._database is not None and hasattr(self._database, "update_task"):
+            try:
+                self._database.update_task(
+                    task_id=task.task_id,
+                    status=task.status.value,
+                )
+            except Exception as exc:
+                raise StorageError(
+                    f"Could not persist expiry for task {task.task_id}: {exc}"
+                ) from exc
+
+        return True
 
     def register_task(
         self,
@@ -108,8 +165,9 @@ class Broker:
         kwargs: Optional[Dict[str, Any]] = None,
         max_attempts: int = 3,
         submission_key: Optional[str] = None,
+        deadline_at: Optional[datetime] = None,
     ) -> Task:
-        """Validate, persist, register, and enqueue a task."""
+        """Validate, persist, register, and enqueue a task (unless already expired)."""
 
         if not isinstance(name, str) or not name.strip():
             raise TaskValidationError(
@@ -148,11 +206,16 @@ class Broker:
                 "max_attempts must be an integer >= 1."
             )
 
+        normalized_deadline: Optional[datetime] = (
+            normalize_deadline(deadline_at) if deadline_at is not None else None
+        )
+
         fingerprint = _canonical_payload_fingerprint(
             normalized_name,
             normalized_args,
             normalized_kwargs,
             max_attempts,
+            deadline_at=normalized_deadline,
         )
 
         normalized_key: Optional[str] = None
@@ -186,7 +249,14 @@ class Broker:
             args=normalized_args,
             kwargs=normalized_kwargs,
             max_attempts=max_attempts,
+            deadline_at=normalized_deadline,
         )
+
+        if normalized_deadline is not None and self._utc_now() >= normalized_deadline:
+            task.transition_to(
+                TaskStatus.EXPIRED,
+                error="Task deadline expired before enqueue.",
+            )
 
         # Persist before registering and enqueueing.
         if self._database is not None:
@@ -211,7 +281,8 @@ class Broker:
                 ) from exc
 
         self._tasks[task.task_id] = task
-        self._queue.enqueue(task.task_id)
+        if task.status == TaskStatus.QUEUED:
+            self._queue.enqueue(task.task_id)
 
         if normalized_key is not None:
             self._submission_keys[normalized_key] = (
@@ -227,11 +298,27 @@ class Broker:
         *args: Any,
         **kwargs: Any,
     ) -> Task:
-        """Submit a task."""
+        """Submit a task without a deadline."""
         return self.register_task(
             name,
             args=args,
             kwargs=kwargs,
+        )
+
+    def submit_task_with_deadline(
+        self,
+        deadline_at: datetime,
+        name: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Task:
+        """Submit a task with a required timezone-aware deadline."""
+        normalized_deadline = normalize_deadline(deadline_at)
+        return self.register_task(
+            name,
+            args=args,
+            kwargs=kwargs,
+            deadline_at=normalized_deadline,
         )
 
     def submit_task_once(
@@ -299,21 +386,49 @@ class Broker:
             if task.status == status
         ]
 
+    def expire_overdue_tasks(
+        self,
+        *,
+        now: Optional[datetime] = None,
+    ) -> List[Task]:
+        """Transition all non-terminal tasks past their deadline to EXPIRED."""
+        current_time = (
+            self._utc_now() if now is None else normalize_deadline(now)
+        )
+        expired: List[Task] = []
+        for task in self._tasks.values():
+            if not task.is_terminal and self._expire_task_if_due(
+                task,
+                now=current_time,
+            ):
+                expired.append(task)
+        return expired
+
     def dequeue_task(self) -> Optional[Task]:
-        """Dequeue the next pending task."""
+        """Dequeue the next non-expired pending task."""
 
-        task_id = self._queue.dequeue_nowait()
+        while True:
+            task_id = self._queue.dequeue_nowait()
 
-        if task_id is None:
-            return None
+            if task_id is None:
+                return None
 
-        return self._tasks[task_id]
+            task = self._tasks[task_id]
+
+            if self._expire_task_if_due(task):
+                continue
+
+            return task
 
     async def wait_for_task(self) -> Task:
-        """Wait asynchronously for the next pending task."""
+        """Wait asynchronously for the next non-expired pending task."""
 
-        task_id = await self._queue.dequeue()
-        return self._tasks[task_id]
+        while True:
+            task_id = await self._queue.dequeue()
+            task = self._tasks[task_id]
+            if self._expire_task_if_due(task):
+                continue
+            return task
 
     def requeue_task(
         self,
@@ -343,7 +458,7 @@ class Broker:
             self._queue.enqueue(task_id)
 
     def assign_next_task(self, peers):
-        """Assign the next pending task to an eligible peer."""
+        """Assign the next pending non-expired task to an eligible peer."""
 
         task = self.dequeue_task()
 

@@ -23,6 +23,15 @@ class InvalidTaskTransitionError(TaskError, ValueError):
     """Raised when an unsupported task lifecycle state transition occurs."""
 
 
+def normalize_deadline(deadline_at: datetime) -> datetime:
+    """Validate that ``deadline_at`` is a timezone-aware datetime and convert to UTC."""
+    if not isinstance(deadline_at, datetime):
+        raise TaskValidationError("Task deadline must be a datetime.")
+    if deadline_at.tzinfo is None or deadline_at.utcoffset() is None:
+        raise TaskValidationError("Task deadline must be timezone-aware.")
+    return deadline_at.astimezone(timezone.utc)
+
+
 class TaskStatus(str, Enum):
     """Lifecycle states of a task managed by the broker."""
 
@@ -104,6 +113,7 @@ class Task:
     args: Tuple[Any, ...] = field(default_factory=tuple)
     kwargs: Dict[str, Any] = field(default_factory=dict)
     max_attempts: int = 3
+    deadline_at: Optional[datetime] = None
 
     task_id: str = field(
         default_factory=lambda: str(uuid4()),
@@ -147,7 +157,23 @@ class Task:
         if not isinstance(self.kwargs, dict):
             raise TaskValidationError("Task kwargs must be a dictionary.")
 
+        if self.deadline_at is not None:
+            self.deadline_at = normalize_deadline(self.deadline_at)
+
         self.updated_at = self.created_at
+
+    def is_expired(self, now: Optional[datetime] = None) -> bool:
+        """Return True if the task is already EXPIRED or past ``deadline_at``."""
+        if self.status == TaskStatus.EXPIRED:
+            return True
+        if self.deadline_at is None:
+            return False
+        current_time = (
+            datetime.now(timezone.utc)
+            if now is None
+            else normalize_deadline(now)
+        )
+        return current_time >= self.deadline_at
 
     @property
     def is_terminal(self) -> bool:
@@ -206,4 +232,9 @@ class Task:
             "attempt_count": self.attempt_count,
             "max_attempts": self.max_attempts,
             "last_error": self.last_error,
+            "deadline_at": (
+                self.deadline_at.isoformat()
+                if self.deadline_at is not None
+                else None
+            ),
         }

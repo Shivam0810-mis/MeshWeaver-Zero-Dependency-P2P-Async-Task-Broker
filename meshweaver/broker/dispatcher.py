@@ -23,7 +23,7 @@ Design notes & integration boundaries:
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
 from uuid import uuid4
 
 from ..models.enums import MessageType
@@ -94,8 +94,9 @@ class DispatchBroker(Broker):
         database: Any = None,
         scheduler: Optional[PeerSelectorProtocol] = None,
         queue: Optional[TaskQueueProtocol] = None,
+        clock: Optional[Callable[[], datetime]] = None,
     ) -> None:
-        super().__init__(database=database, queue=queue)
+        super().__init__(database=database, queue=queue, clock=clock)
         if not isinstance(node_id, str) or not node_id.strip():
             raise TaskValidationError("node_id must be a non-empty string.")
         self._node_id = node_id.strip()
