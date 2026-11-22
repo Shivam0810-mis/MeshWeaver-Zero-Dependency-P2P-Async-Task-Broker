@@ -3,6 +3,7 @@ import asyncio
 from worker.result import WorkerResult
 
 
+
 class Worker:
     def __init__(self, max_concurrency=2):
         self.handlers = {}
@@ -74,3 +75,4 @@ class Worker:
             task = await self.task_queue.get()
 
             asyncio.create_task(self.process_task(task))
+        return function(*args)
