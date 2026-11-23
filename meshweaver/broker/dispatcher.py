@@ -105,6 +105,7 @@ class DispatchBroker(Broker):
         )
         self._reservations: Counter[str] = Counter()
         self._active: Dict[str, Assignment] = {}
+        self._active_by_task: Dict[str, str] = {}
 
     @property
     def node_id(self) -> str:
@@ -126,6 +127,7 @@ class DispatchBroker(Broker):
         """Undo a local assignment when dispatch fails before peer acceptance."""
         if assignment.assignment_id in self._active:
             del self._active[assignment.assignment_id]
+            self._active_by_task.pop(assignment.task_id, None)
             self._release_reservation(assignment.peer_id)
 
         task = self.get_task(assignment.task_id)
@@ -168,7 +170,11 @@ class DispatchBroker(Broker):
             if task is None:
                 return None
 
-            if task.is_terminal:
+            if (
+                task.is_terminal
+                or task.status != TaskStatus.QUEUED
+                or task.task_id in self._active_by_task
+            ):
                 continue
 
             if task.attempt_count >= task.max_attempts:
@@ -189,6 +195,7 @@ class DispatchBroker(Broker):
             )
 
             self._active[assignment.assignment_id] = assignment
+            self._active_by_task[task.task_id] = assignment.assignment_id
             self._reservations[selected.peer_id] += 1
             return assignment
 
@@ -293,6 +300,7 @@ class DispatchBroker(Broker):
         task.transition_to(TaskStatus.COMPLETED)
         self._release_reservation(peer_id)
         del self._active[assignment_id]
+        self._active_by_task.pop(assignment.task_id, None)
         return True
 
     def handle_message(self, message: Message) -> bool:
@@ -325,6 +333,20 @@ class DispatchBroker(Broker):
         assignment_id: str,
     ) -> Optional[Assignment]:
         """Return an active assignment by ID, or None if not active."""
+        return self._active.get(assignment_id)
+
+    def has_active_assignment(self, task_id: str) -> bool:
+        """Return True if ``task_id`` currently has an active in-flight assignment."""
+        return task_id in self._active_by_task
+
+    def get_active_assignment_for_task(
+        self,
+        task_id: str,
+    ) -> Optional[Assignment]:
+        """Return the active assignment for ``task_id``, or None."""
+        assignment_id = self._active_by_task.get(task_id)
+        if assignment_id is None:
+            return None
         return self._active.get(assignment_id)
 
     def active_assignment_count(self) -> int:

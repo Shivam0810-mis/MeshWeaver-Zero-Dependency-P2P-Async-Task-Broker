@@ -345,6 +345,52 @@ class Broker:
             submission_key=submission_key,
         )
 
+    def submit_task_once_with_deadline(
+        self,
+        submission_key: str,
+        deadline_at: datetime,
+        name: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Task:
+        """Submit a task idempotently with a required timezone-aware deadline."""
+
+        if (
+            not isinstance(submission_key, str)
+            or not submission_key.strip()
+        ):
+            raise TaskValidationError(
+                "Submission key must be a non-empty string."
+            )
+
+        normalized_deadline = normalize_deadline(deadline_at)
+        return self.register_task(
+            name,
+            args=args,
+            kwargs=kwargs,
+            submission_key=submission_key,
+            deadline_at=normalized_deadline,
+        )
+
+    def has_submission_key(self, submission_key: str) -> bool:
+        """Return True if ``submission_key`` is already registered locally."""
+        if not isinstance(submission_key, str) or not submission_key.strip():
+            return False
+        return submission_key.strip() in self._submission_keys
+
+    def get_task_by_submission_key(
+        self,
+        submission_key: str,
+    ) -> Optional[Task]:
+        """Return the task registered under ``submission_key``, or None."""
+        if not isinstance(submission_key, str) or not submission_key.strip():
+            return None
+        entry = self._submission_keys.get(submission_key.strip())
+        if entry is None:
+            return None
+        task_id, _ = entry
+        return self._tasks.get(task_id)
+
     def get_task(self, task_id: str) -> Task:
         """Return a task by ID."""
         if task_id not in self._tasks:
