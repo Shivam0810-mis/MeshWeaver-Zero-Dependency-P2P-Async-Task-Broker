@@ -117,6 +117,19 @@ class Broker:
     def _utc_now(self) -> datetime:
         return normalize_deadline(self._clock())
 
+    def _persist_task_status(self, task: Task) -> None:
+        """Persist updated task status when a database backend is attached."""
+        if self._database is not None and hasattr(self._database, "update_task"):
+            try:
+                self._database.update_task(
+                    task_id=task.task_id,
+                    status=task.status.value,
+                )
+            except Exception as exc:
+                raise StorageError(
+                    f"Could not persist status for task {task.task_id}: {exc}"
+                ) from exc
+
     def _expire_task_if_due(
         self,
         task: Task,
@@ -144,16 +157,7 @@ class Broker:
             error="Task deadline expired.",
         )
 
-        if self._database is not None and hasattr(self._database, "update_task"):
-            try:
-                self._database.update_task(
-                    task_id=task.task_id,
-                    status=task.status.value,
-                )
-            except Exception as exc:
-                raise StorageError(
-                    f"Could not persist expiry for task {task.task_id}: {exc}"
-                ) from exc
+        self._persist_task_status(task)
 
         return True
 
@@ -451,7 +455,7 @@ class Broker:
         return expired
 
     def dequeue_task(self) -> Optional[Task]:
-        """Dequeue the next non-expired pending task."""
+        """Dequeue the next non-terminal, non-expired pending task."""
 
         while True:
             task_id = self._queue.dequeue_nowait()
@@ -461,20 +465,50 @@ class Broker:
 
             task = self._tasks[task_id]
 
-            if self._expire_task_if_due(task):
+            if task.is_terminal or self._expire_task_if_due(task):
                 continue
 
             return task
 
     async def wait_for_task(self) -> Task:
-        """Wait asynchronously for the next non-expired pending task."""
+        """Wait asynchronously for the next non-terminal, non-expired pending task."""
 
         while True:
             task_id = await self._queue.dequeue()
             task = self._tasks[task_id]
-            if self._expire_task_if_due(task):
+            if task.is_terminal or self._expire_task_if_due(task):
                 continue
             return task
+
+    def requeue_retry_task(
+        self,
+        task_id: str,
+        *,
+        front: bool = False,
+    ) -> bool:
+        """Transition a ``RETRY_WAIT`` task back to ``QUEUED`` and enqueue it.
+
+        Returns False (without enqueueing) if the task is not in ``RETRY_WAIT``,
+        has passed its deadline (marked ``EXPIRED``), or has exhausted
+        ``max_attempts`` (marked ``FAILED``).
+        """
+        task = self.get_task(task_id)
+
+        if task.status != TaskStatus.RETRY_WAIT:
+            return False
+
+        if self._expire_task_if_due(task):
+            return False
+
+        if task.attempt_count >= task.max_attempts:
+            task.transition_to(TaskStatus.FAILED)
+            self._persist_task_status(task)
+            return False
+
+        task.transition_to(TaskStatus.QUEUED)
+        self._persist_task_status(task)
+        self.requeue_task(task.task_id, front=front)
+        return True
 
     def requeue_task(
         self,

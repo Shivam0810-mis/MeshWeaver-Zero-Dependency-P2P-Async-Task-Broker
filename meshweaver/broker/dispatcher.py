@@ -1,4 +1,4 @@
-"""Assignment creation, async dispatch boundary, and ACK lifecycle handling.
+"""Assignment creation, async dispatch boundary, ACK handling, and retry policy.
 
 Design notes & integration boundaries:
     - ``TaskTransportProtocol`` is the integration boundary to Member 1's
@@ -6,8 +6,14 @@ Design notes & integration boundaries:
       ``Message(MessageType.TASK_SUBMIT, ...)`` through this boundary and rolls
       back the local assignment/requeues the task if sending fails.
     - ``handle_message`` is the protocol adapter boundary for ``TASK_ACK``,
-      ``TASK_STARTED``, and ``TASK_RESULT`` messages. ``TASK_ACK`` confirms
-      worker acceptance (``ASSIGNING -> ASSIGNED``), NOT execution completion.
+      ``TASK_REJECT``, ``TASK_STARTED``, ``TASK_RESULT``, and ``TASK_FAILED``.
+      ``TASK_ACK`` confirms worker acceptance (``ASSIGNING -> ASSIGNED``), NOT
+      execution completion.
+    - ``process_ack_timeouts`` enforces acceptance-ACK timeouts using an
+      injectable monotonic clock (``ack_clock``). ACK timeout handling is
+      distinct from worker execution timeouts (owned by Member 3): once an
+      assignment is acknowledged (``ASSIGNED`` / ``RUNNING``), its ACK deadline
+      is cleared.
     - Local capacity reservations only coordinate assignments within this
       broker instance. Another broker may target the same worker concurrently,
       so worker acceptance (``TASK_ACK`` / ``TASK_REJECT``) is authoritative.
@@ -16,13 +22,14 @@ Design notes & integration boundaries:
       callers should pass external/unreserved counts or refresh snapshots
       consistently.
     - Network ACK loss can cause repeat execution (at-least-once semantics,
-      not exactly-once). Acceptance-timeout retry policies belong to Day 16 and
-      execution timeouts belong to Member 3.
+      not exactly-once).
 """
 
+import math
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from time import monotonic
 from typing import Any, Callable, Dict, Iterable, Optional
 from uuid import uuid4
 
@@ -85,7 +92,7 @@ class Assignment:
 
 
 class DispatchBroker(Broker):
-    """Extends ``Broker`` with scheduling, local reservations, dispatch, and ACKs."""
+    """Extends ``Broker`` with scheduling, reservations, dispatch, ACKs, and retries."""
 
     def __init__(
         self,
@@ -95,7 +102,22 @@ class DispatchBroker(Broker):
         scheduler: Optional[PeerSelectorProtocol] = None,
         queue: Optional[TaskQueueProtocol] = None,
         clock: Optional[Callable[[], datetime]] = None,
+        ack_timeout: float = 5.0,
+        ack_clock: Callable[[], float] = monotonic,
     ) -> None:
+        if (
+            isinstance(ack_timeout, bool)
+            or not isinstance(ack_timeout, (int, float))
+            or not math.isfinite(ack_timeout)
+            or ack_timeout <= 0
+        ):
+            raise TaskValidationError(
+                "ACK timeout must be a finite positive number."
+            )
+
+        if not callable(ack_clock):
+            raise TypeError("ack_clock must be callable.")
+
         super().__init__(database=database, queue=queue, clock=clock)
         if not isinstance(node_id, str) or not node_id.strip():
             raise TaskValidationError("node_id must be a non-empty string.")
@@ -106,17 +128,42 @@ class DispatchBroker(Broker):
         self._reservations: Counter[str] = Counter()
         self._active: Dict[str, Assignment] = {}
         self._active_by_task: Dict[str, str] = {}
+        self._ack_timeout: float = float(ack_timeout)
+        self._ack_clock: Callable[[], float] = ack_clock
+        self._ack_deadlines: Dict[str, float] = {}
 
     @property
     def node_id(self) -> str:
         """Return the broker node identifier used on outbound protocol messages."""
         return self._node_id
 
+    @property
+    def ack_timeout(self) -> float:
+        """Return the configured acceptance-ACK timeout in seconds."""
+        return self._ack_timeout
+
     def _release_reservation(self, peer_id: str) -> None:
         if self._reservations[peer_id] > 1:
             self._reservations[peer_id] -= 1
         else:
             self._reservations.pop(peer_id, None)
+
+    def _release_assignment(
+        self,
+        assignment_id: str,
+    ) -> Optional[Assignment]:
+        """Remove an active assignment, clear its ACK deadline, and free capacity."""
+        assignment = self._active.pop(assignment_id, None)
+        self._ack_deadlines.pop(assignment_id, None)
+
+        if assignment is None:
+            return None
+
+        if self._active_by_task.get(assignment.task_id) == assignment_id:
+            self._active_by_task.pop(assignment.task_id, None)
+
+        self._release_reservation(assignment.peer_id)
+        return assignment
 
     def _rollback_unconfirmed_assignment(
         self,
@@ -125,10 +172,7 @@ class DispatchBroker(Broker):
         error: Optional[str] = None,
     ) -> None:
         """Undo a local assignment when dispatch fails before peer acceptance."""
-        if assignment.assignment_id in self._active:
-            del self._active[assignment.assignment_id]
-            self._active_by_task.pop(assignment.task_id, None)
-            self._release_reservation(assignment.peer_id)
+        self._release_assignment(assignment.assignment_id)
 
         task = self.get_task(assignment.task_id)
         if task.attempt_count > 0:
@@ -182,6 +226,7 @@ class DispatchBroker(Broker):
                     TaskStatus.FAILED,
                     error="Attempt limit exhausted before dispatch.",
                 )
+                self._persist_task_status(task)
                 continue
 
             task.transition_to(TaskStatus.ASSIGNING)
@@ -196,6 +241,9 @@ class DispatchBroker(Broker):
 
             self._active[assignment.assignment_id] = assignment
             self._active_by_task[task.task_id] = assignment.assignment_id
+            self._ack_deadlines[assignment.assignment_id] = (
+                self._ack_clock() + self._ack_timeout
+            )
             self._reservations[selected.peer_id] += 1
             return assignment
 
@@ -262,9 +310,14 @@ class DispatchBroker(Broker):
         task = self.get_task(assignment.task_id)
         if task.status == TaskStatus.ASSIGNING:
             task.transition_to(TaskStatus.ASSIGNED)
+            self._ack_deadlines.pop(assignment_id, None)
             return True
 
-        return task.status in (TaskStatus.ASSIGNED, TaskStatus.RUNNING)
+        if task.status in (TaskStatus.ASSIGNED, TaskStatus.RUNNING):
+            self._ack_deadlines.pop(assignment_id, None)
+            return True
+
+        return False
 
     def mark_running(
         self,
@@ -298,16 +351,101 @@ class DispatchBroker(Broker):
             return False
 
         task.transition_to(TaskStatus.COMPLETED)
-        self._release_reservation(peer_id)
-        del self._active[assignment_id]
-        self._active_by_task.pop(assignment.task_id, None)
+        self._release_assignment(assignment_id)
+        self._persist_task_status(task)
         return True
+
+    def fail_assignment(
+        self,
+        assignment_id: str,
+        peer_id: str,
+        error: str,
+    ) -> bool:
+        """Handle a rejected, unacknowledged, or failed active assignment.
+
+        Releases the peer reservation and invalidates ``assignment_id`` so late
+        messages from the previous worker cannot mutate newer attempts. The
+        task is marked ``EXPIRED`` if past deadline, ``FAILED`` if it reached
+        ``max_attempts``, or transitioned through ``RETRY_WAIT -> QUEUED`` and
+        re-enqueued for retry without incrementing ``attempt_count``.
+        """
+        assignment = self._matches(assignment_id, peer_id)
+        if assignment is None:
+            return False
+
+        task = self.get_task(assignment.task_id)
+        if task.status not in (
+            TaskStatus.ASSIGNING,
+            TaskStatus.ASSIGNED,
+            TaskStatus.RUNNING,
+        ):
+            return False
+
+        if not isinstance(error, str) or not error.strip():
+            raise TaskValidationError(
+                "Assignment failure reason must be a non-empty string."
+            )
+
+        reason = error.strip()
+        self._release_assignment(assignment_id)
+        task.last_error = reason
+
+        if self._expire_task_if_due(task):
+            return True
+
+        if task.attempt_count >= task.max_attempts:
+            task.transition_to(TaskStatus.FAILED, error=reason)
+            self._persist_task_status(task)
+            return True
+
+        task.transition_to(TaskStatus.RETRY_WAIT, error=reason)
+        self.requeue_retry_task(task.task_id)
+        return True
+
+    def process_ack_timeouts(self) -> int:
+        """Fail and retry/exhaust any ``ASSIGNING`` assignments past ``ack_timeout``.
+
+        Only unacknowledged ``ASSIGNING`` assignments expire here; acknowledged
+        ``ASSIGNED`` or ``RUNNING`` assignments are never timed out by ACK
+        timeout processing (worker execution timeouts are owned by Member 3).
+        """
+        now = self._ack_clock()
+        processed = 0
+
+        for assignment_id, ack_deadline in list(self._ack_deadlines.items()):
+            if now < ack_deadline:
+                continue
+
+            assignment = self._active.get(assignment_id)
+            if assignment is None:
+                self._ack_deadlines.pop(assignment_id, None)
+                continue
+
+            task = self.get_task(assignment.task_id)
+            if task.is_terminal:
+                self._release_assignment(assignment_id)
+                continue
+
+            if task.status != TaskStatus.ASSIGNING:
+                self._ack_deadlines.pop(assignment_id, None)
+                continue
+
+            handled = self.fail_assignment(
+                assignment_id,
+                assignment.peer_id,
+                "Assignment acknowledgement timed out.",
+            )
+            if handled:
+                processed += 1
+
+        return processed
 
     def handle_message(self, message: Message) -> bool:
         """Protocol adapter boundary for inbound worker lifecycle messages.
 
-        Supports ``TASK_ACK``, ``TASK_STARTED``, and ``TASK_RESULT`` using
-        Member 4's shared ``Message`` schema.
+        Supports ``TASK_ACK``, ``TASK_REJECT``, ``TASK_STARTED``,
+        ``TASK_RESULT``, and ``TASK_FAILED`` using Member 4's shared
+        ``Message`` schema.
         """
         if not isinstance(message, Message):
             raise TaskValidationError(
@@ -325,6 +463,28 @@ class DispatchBroker(Broker):
             return self.mark_running(assignment_id, peer_id)
         if message.message_type == MessageType.TASK_RESULT:
             return self.complete(assignment_id, peer_id)
+        if message.message_type == MessageType.TASK_REJECT:
+            assignment = self._matches(assignment_id, peer_id)
+            if assignment is None:
+                return False
+            task = self.get_task(assignment.task_id)
+            if task.status != TaskStatus.ASSIGNING:
+                return False
+            raw_reason = message.payload.get("reason") or message.payload.get("error")
+            reason = (
+                raw_reason.strip()
+                if isinstance(raw_reason, str) and raw_reason.strip()
+                else "Assignment rejected by peer."
+            )
+            return self.fail_assignment(assignment_id, peer_id, reason)
+        if message.message_type == MessageType.TASK_FAILED:
+            raw_error = message.payload.get("error") or message.payload.get("reason")
+            reason = (
+                raw_error.strip()
+                if isinstance(raw_error, str) and raw_error.strip()
+                else "Task execution failed on peer."
+            )
+            return self.fail_assignment(assignment_id, peer_id, reason)
 
         return False
 
@@ -352,6 +512,10 @@ class DispatchBroker(Broker):
     def active_assignment_count(self) -> int:
         """Return count of currently active (uncompleted) assignments."""
         return len(self._active)
+
+    def pending_ack_count(self) -> int:
+        """Return count of active assignments still awaiting acceptance ACK."""
+        return len(self._ack_deadlines)
 
     def reservation_count(self, peer_id: str) -> int:
         """Return number of local active reservations held for ``peer_id``."""
