@@ -231,3 +231,23 @@ async def test_worker_respects_concurrency_limit():
 
     assert len(worker.results) == 5
     assert max_active_tasks == 2
+
+@pytest.mark.asyncio
+async def test_worker_task_timeout():
+    worker = Worker(task_timeout=1)
+
+    async def slow_task():
+        await asyncio.sleep(3)
+        return "completed"
+
+    worker.register_handler("slow_task", slow_task)
+
+    result = await worker.dispatch({
+        "task_name": "slow_task",
+        "args": []
+    })
+
+    assert result.success is False
+    assert result.result is None
+    assert "timed out" in result.error
+
