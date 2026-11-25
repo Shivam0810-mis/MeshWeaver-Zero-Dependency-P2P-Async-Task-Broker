@@ -210,3 +210,22 @@
 
 
 
+
+## 9. Day 14–16 Progress Addendum (Updated 25 November 2026)
+
+| Day | Date | Work and Status |
+|---|---|---|
+| Day 14 | 22 Nov 2026 | Mid-review preparation and previously recorded test evidence. |
+| Day 15 | 23 Nov 2026 | Completed review findings and integration test plan. Committed as `fd34d7c` and pushed successfully. |
+| Day 16 | 24 Nov 2026 | Verified that the Member 4 branch is synchronized with its remote branch. Mid-review demonstration remains pending because the review has not yet taken place. |
+
+**Latest confirmed commit:** `fd34d7c`
+
+**Latest commit message:** `docs: add day 15 review findings and integration test plan`
+
+**Branch synchronization:** Local HEAD and `origin/feature/member-4-integration` point to the same commit.
+
+**Mid-review demonstration:** Pending — not yet conducted.
+
+**Note:** Previously recorded test results are historical evidence and are not claimed as fresh Day 16 test executions.
+
