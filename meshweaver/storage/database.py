@@ -14,20 +14,13 @@ class Database:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
-
-    def initialize(self) -> None:
-        """Create the initial database schema and migration record."""
-        connection = self.get_connection()
-
-        try:
-            connection.execute("""
-                CREATE TABLE IF NOT EXISTS schema_migrations (
-                    version INTEGER PRIMARY KEY,
-                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            connection.execute("""
+    
+    
+    def _get_migrations(self):
+        """Return database migrations in version order."""
+        return {
+            1: [
+                """
                 CREATE TABLE IF NOT EXISTS peers (
                     peer_id TEXT PRIMARY KEY,
                     host TEXT NOT NULL,
@@ -36,9 +29,8 @@ class Database:
                     last_seen TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
-            """)
-
-            connection.execute("""
+                """,
+                """
                 CREATE TABLE IF NOT EXISTS tasks (
                     task_id TEXT PRIMARY KEY,
                     task_type TEXT NOT NULL,
@@ -51,19 +43,60 @@ class Database:
                     FOREIGN KEY (assigned_peer_id)
                         REFERENCES peers(peer_id)
                 )
+                """,
+            ],
+        }
+
+
+    
+    def initialize(self) -> None:
+        """Create the initial schema and apply pending migrations."""
+        connection = self.get_connection()
+
+        try:
+            connection.execute("BEGIN")
+            
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
             """)
 
-            connection.execute("""
-                INSERT OR IGNORE INTO schema_migrations (version)
-                VALUES (1)
-            """)
+            current_version = connection.execute(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
+            ).fetchone()[0]
+
+            migrations = self._get_migrations()
+
+            for version in sorted(migrations):
+                if version <= current_version:
+                    continue
+
+                if version != current_version + 1:
+                    raise RuntimeError(
+                        f"Missing migration for version {current_version + 1}"
+                    )
+
+                for statement in migrations[version]:
+                    connection.execute(statement)
+
+                connection.execute(
+                    "INSERT INTO schema_migrations (version) VALUES (?)",
+                    (version,),
+                )
+
+                current_version = version
 
             connection.commit()
+
         except Exception:
             connection.rollback()
             raise
+
         finally:
             connection.close()
+
 
     # Peer CRUD operations
 
@@ -238,8 +271,8 @@ class Database:
                 """
                 UPDATE tasks
                 SET status = ?,
-                    assigned_peer_id = ?,
-                    result = ?,
+                    assigned_peer_id = COALESCE(?, assigned_peer_id),
+                    result = COALESCE(?, result),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE task_id = ?
                 """,
