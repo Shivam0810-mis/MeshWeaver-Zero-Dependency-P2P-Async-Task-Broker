@@ -309,6 +309,15 @@ class DispatchBroker(Broker):
 
         task = self.get_task(assignment.task_id)
         if task.status == TaskStatus.ASSIGNING:
+            ack_deadline = self._ack_deadlines.get(assignment_id)
+            if ack_deadline is not None and self._ack_clock() >= ack_deadline:
+                self.fail_assignment(
+                    assignment_id,
+                    peer_id,
+                    "Assignment acknowledgement timed out.",
+                )
+                return False
+
             task.transition_to(TaskStatus.ASSIGNED)
             self._ack_deadlines.pop(assignment_id, None)
             return True
