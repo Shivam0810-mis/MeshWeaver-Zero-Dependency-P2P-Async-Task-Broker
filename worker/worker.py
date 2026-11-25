@@ -3,15 +3,18 @@ import asyncio
 from worker.result import WorkerResult
 
 
-
 class Worker:
-    def __init__(self, max_concurrency=2):
+
+    def __init__(self, max_concurrency=2, task_timeout=5):
         self.handlers = {}
         self.task_queue = asyncio.Queue()
         self.results = []
 
-        # Limits the number of tasks executing simultaneously
+        # Limit simultaneous task execution
         self.semaphore = asyncio.Semaphore(max_concurrency)
+
+        # Maximum execution time for each task
+        self.task_timeout = task_timeout
 
     def validate_task_name(self, task_name):
         if not isinstance(task_name, str):
@@ -45,18 +48,29 @@ class Worker:
 
         function = self.handlers[task_name]
 
-        if asyncio.iscoroutinefunction(function):
-            return await function(*args)
+        async def run_handler():
+            if asyncio.iscoroutinefunction(function):
+                return await function(*args)
+            return function(*args)
 
-        return function(*args)
+        return await asyncio.wait_for(
+            run_handler(),
+            timeout=self.task_timeout
+        )
 
     async def dispatch(self, task):
         task_name = task["task_name"]
         args = task.get("args", [])
 
-        result = await self.execute_async(task_name, *args)
+        try:
+            result = await self.execute_async(task_name, *args)
+            return WorkerResult(task_name, result=result)
 
-        return WorkerResult(task_name, result=result)
+        except TimeoutError:
+            return WorkerResult(
+                task_name,
+                error=f"Task execution timed out after {self.task_timeout} seconds"
+            )
 
     async def receive_task(self, task):
         await self.task_queue.put(task)
@@ -66,13 +80,10 @@ class Worker:
             async with self.semaphore:
                 result = await self.dispatch(task)
                 self.results.append(result)
-
         finally:
             self.task_queue.task_done()
 
     async def run(self):
         while True:
             task = await self.task_queue.get()
-
             asyncio.create_task(self.process_task(task))
-        return function(*args)
