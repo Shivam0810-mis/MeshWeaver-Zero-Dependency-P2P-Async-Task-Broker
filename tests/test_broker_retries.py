@@ -250,6 +250,59 @@ class TestRetryPolicyForUnacknowledgedAndFailedAssignments(unittest.TestCase):
             self.assertEqual(task.status, TaskStatus.FAILED)
             self.assertEqual(db.get_task(task.task_id)["status"], TaskStatus.FAILED.value)
 
+    def test_repeated_timeout_processing_does_not_duplicate_retry(self):
+        ack_clock = FakeMonotonicClock(0.0)
+        broker = DispatchBroker(ack_timeout=5.0, ack_clock=ack_clock)
+        task = broker.submit_task("process", value=1)
+        peers = [PeerInfo("peer-1", cpu_usage=10.0, running_tasks=0, max_tasks=2)]
+
+        assignment = broker.assign_next(peers)
+        self.assertIsNotNone(assignment)
+        assert assignment is not None
+
+        ack_clock.advance(5.0)
+
+        self.assertEqual(broker.process_ack_timeouts(), 1)
+        self.assertEqual(broker.process_ack_timeouts(), 0)
+        self.assertEqual(broker.reservation_count("peer-1"), 0)
+
+        retry_assignment = broker.assign_next(peers)
+        self.assertIsNotNone(retry_assignment)
+        assert retry_assignment is not None
+        self.assertEqual(retry_assignment.task_id, task.task_id)
+        self.assertNotEqual(
+            retry_assignment.assignment_id,
+            assignment.assignment_id,
+        )
+        self.assertEqual(task.attempt_count, 2)
+        self.assertEqual(broker.reservation_count("peer-1"), 1)
+
+        self.assertIsNone(broker.assign_next(peers))
+        self.assertEqual(task.attempt_count, 2)
+        self.assertEqual(broker.reservation_count("peer-1"), 1)
+
+    def test_late_ack_is_rejected_before_timeout_processing(self):
+        ack_clock = FakeMonotonicClock(0.0)
+        broker = DispatchBroker(ack_timeout=5.0, ack_clock=ack_clock)
+        task = broker.submit_task("process", value=1)
+        peers = [PeerInfo("peer-1", cpu_usage=10.0, running_tasks=0, max_tasks=2)]
+
+        assignment = broker.assign_next(peers)
+        self.assertIsNotNone(assignment)
+        assert assignment is not None
+
+        ack_clock.advance(5.0)
+
+        self.assertFalse(
+            broker.acknowledge(
+                assignment.assignment_id,
+                assignment.peer_id,
+            )
+        )
+        self.assertEqual(task.status, TaskStatus.QUEUED)
+        self.assertEqual(task.last_error, "Assignment acknowledgement timed out.")
+        self.assertEqual(broker.reservation_count("peer-1"), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
