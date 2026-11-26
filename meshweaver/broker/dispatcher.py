@@ -165,6 +165,20 @@ class DispatchBroker(Broker):
         self._release_reservation(assignment.peer_id)
         return assignment
 
+    def _expire_task_if_due(
+        self,
+        task: Task,
+        *,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """Expire overdue task and release any active assignment/reservation."""
+        expired = super()._expire_task_if_due(task, now=now)
+        if expired:
+            assignment_id = self._active_by_task.get(task.task_id)
+            if assignment_id is not None:
+                self._release_assignment(assignment_id)
+        return expired
+
     def _rollback_unconfirmed_assignment(
         self,
         assignment: Assignment,
@@ -308,6 +322,8 @@ class DispatchBroker(Broker):
             return False
 
         task = self.get_task(assignment.task_id)
+        if self._expire_task_if_due(task):
+            return False
         if task.status == TaskStatus.ASSIGNING:
             ack_deadline = self._ack_deadlines.get(assignment_id)
             if ack_deadline is not None and self._ack_clock() >= ack_deadline:
@@ -339,6 +355,8 @@ class DispatchBroker(Broker):
             return False
 
         task = self.get_task(assignment.task_id)
+        if self._expire_task_if_due(task):
+            return False
         if task.status == TaskStatus.ASSIGNED:
             task.transition_to(TaskStatus.RUNNING)
             return True
@@ -356,6 +374,8 @@ class DispatchBroker(Broker):
             return False
 
         task = self.get_task(assignment.task_id)
+        if self._expire_task_if_due(task):
+            return False
         if task.status not in (TaskStatus.ASSIGNED, TaskStatus.RUNNING):
             return False
 
