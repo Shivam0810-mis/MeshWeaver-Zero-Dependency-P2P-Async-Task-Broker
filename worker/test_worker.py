@@ -251,3 +251,23 @@ async def test_worker_task_timeout():
     assert result.result is None
     assert "timed out" in result.error
 
+@pytest.mark.asyncio
+async def test_worker_handles_handler_exception():
+    worker = Worker()
+
+    def divide(a, b):
+        return a / b
+
+    worker.register_handler("division", divide)
+
+    result = await worker.dispatch({
+        "task_name": "division",
+        "args": [10, 0]
+    })
+
+    assert result.success is False
+    assert result.result is None
+    assert "ZeroDivisionError" in result.error
+    assert "division by zero" in result.error
+
+
