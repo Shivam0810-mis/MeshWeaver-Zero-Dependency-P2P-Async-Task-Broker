@@ -71,6 +71,11 @@ class Worker:
                 task_name,
                 error=f"Task execution timed out after {self.task_timeout} seconds"
             )
+        except Exception as e:
+            return WorkerResult(
+                task_name,
+                error=f"{type(e).__name__}: {str(e)}"
+            )
 
     async def receive_task(self, task):
         await self.task_queue.put(task)
