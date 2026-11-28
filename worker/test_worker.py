@@ -270,4 +270,43 @@ async def test_worker_handles_handler_exception():
     assert "ZeroDivisionError" in result.error
     assert "division by zero" in result.error
 
+@pytest.mark.asyncio
+async def test_worker_continues_after_task_failure():
+    worker = Worker(max_concurrency=1)
+
+    def divide(a, b):
+        return a / b
+
+    def add(a, b):
+        return a + b
+
+    worker.register_handler("division", divide)
+    worker.register_handler("addition", add)
+
+    runner = asyncio.create_task(worker.run())
+
+    await worker.receive_task({
+        "task_name": "division",
+        "args": [10, 0]
+    })
+
+    await worker.receive_task({
+        "task_name": "addition",
+        "args": [10, 20]
+    })
+
+    await worker.task_queue.join()
+
+    runner.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner
+
+    assert len(worker.results) == 2
+    assert worker.results[0].success is False
+    assert "ZeroDivisionError" in worker.results[0].error
+    assert worker.results[1].success is True
+    assert worker.results[1].result == 30
+
+
 
