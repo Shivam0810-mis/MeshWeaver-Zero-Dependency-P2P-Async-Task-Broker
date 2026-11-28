@@ -229,3 +229,30 @@
 
 **Note:** Previously recorded test results are historical evidence and are not claimed as fresh Day 16 test executions.
 
+
+## 10. Day 17 Progress Addendum (25 November 2026)
+
+| Area | Work and Status |
+|---|---|
+| Dispatcher testing | Added malformed assignment ID and wrong-peer task-result rejection test. |
+| Lifecycle testing | Added coverage for transitions to `EXPIRED` from all active task states. |
+| Regression testing | Full unittest discovery completed successfully: 79/79 tests passed. |
+| Code review | Reviewed both modified test files and confirmed the intended changes. |
+| Documentation | Day 17 test evidence recorded in `test_evidence.md`. |
+
+**Latest confirmed commit on remote:** `b124a98`
+
+**Latest confirmed commit message:** `docs: update day 16 mid review progress evidence`
+
+**Branch:** `feature/member-4-integration`
+
+**Branch synchronization at last verification:** Local HEAD matched `origin/feature/member-4-integration`.
+
+**Outstanding limitations:**
+- Automatic time-based task expiry has not been implemented or verified.
+- Result-content/schema validation requirements have not yet been established.
+- The added tests cover expiry lifecycle transitions and malformed result envelopes, not those missing features.
+
+**Mid-review demonstration:** Pending — the review has not yet taken place.
+
+**Note:** Day 17 test and documentation changes are currently local changes. They are not included in commit `b124a98`.

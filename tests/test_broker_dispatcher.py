@@ -184,6 +184,67 @@ class TestDispatchBrokerAsyncAndAck(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(broker.handle_message(valid_ack))
         self.assertEqual(broker.reservation_count("peer-a"), 0)
 
+    async def test_rejects_malformed_and_wrong_peer_task_results(self):
+        transport = FakeTransport()
+        broker = DispatchBroker(node_id="broker-1")
+        task = broker.submit_task("compute", 5)
+        peers = [PeerInfo("peer-a", cpu_usage=10, running_tasks=0, max_tasks=1)]
+
+        assignment = await broker.dispatch_next(peers, transport)
+        self.assertIsNotNone(assignment)
+
+        valid_ack = Message(
+            message_type=MessageType.TASK_ACK,
+            sender_id="peer-a",
+            payload={"assignment_id": assignment.assignment_id},
+        )
+        self.assertTrue(broker.handle_message(valid_ack))
+
+        # Missing assignment_id is rejected.
+        missing_id = Message(
+            message_type=MessageType.TASK_RESULT,
+            sender_id="peer-a",
+            payload={"result": 25},
+        )
+        self.assertFalse(broker.handle_message(missing_id))
+
+        # Empty assignment_id is rejected.
+        empty_id = Message(
+            message_type=MessageType.TASK_RESULT,
+            sender_id="peer-a",
+            payload={"assignment_id": " ", "result": 25},
+        )
+        self.assertFalse(broker.handle_message(empty_id))
+
+        # Non-string assignment_id is rejected.
+        invalid_id = Message(
+            message_type=MessageType.TASK_RESULT,
+            sender_id="peer-a",
+            payload={"assignment_id": 123, "result": 25},
+        )
+        self.assertFalse(broker.handle_message(invalid_id))
+
+        # Unknown assignment_id is rejected.
+        unknown_id = Message(
+            message_type=MessageType.TASK_RESULT,
+            sender_id="peer-a",
+            payload={"assignment_id": "unknown-assignment", "result": 25},
+        )
+        self.assertFalse(broker.handle_message(unknown_id))
+
+        # A different peer cannot complete this assignment.
+        wrong_peer = Message(
+            message_type=MessageType.TASK_RESULT,
+            sender_id="peer-other",
+            payload={"assignment_id": assignment.assignment_id, "result": 25},
+        )
+        self.assertFalse(broker.handle_message(wrong_peer))
+
+        # Rejected messages must not change task or reservation state.
+        self.assertEqual(task.status, TaskStatus.ASSIGNED)
+        self.assertEqual(broker.reservation_count("peer-a"), 1)
+        self.assertEqual(broker.active_assignment_count(), 1)
+
     async def test_skips_stale_and_unhealthy_peers_with_fake_clock(self):
         clock = FakeClock(initial=200.0)
         scheduler = LeastLoadedScheduler(

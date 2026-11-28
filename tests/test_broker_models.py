@@ -97,6 +97,45 @@ class TestBrokerModelsAndInterfaces(unittest.TestCase):
         with self.assertRaises(InvalidTaskTransitionError):
             task.transition_to(TaskStatus.QUEUED)
 
+    def test_expired_transition_allowed_from_all_active_states(self):
+        active_states = (
+            TaskStatus.QUEUED,
+            TaskStatus.ASSIGNING,
+            TaskStatus.ASSIGNED,
+            TaskStatus.RUNNING,
+            TaskStatus.RETRY_WAIT,
+        )
+
+        for active_state in active_states:
+            with self.subTest(active_state=active_state):
+                task = Task(name="expiry_test")
+
+                if active_state != TaskStatus.QUEUED:
+                    task.transition_to(TaskStatus.ASSIGNING)
+
+                if active_state in (
+                    TaskStatus.ASSIGNED,
+                    TaskStatus.RUNNING,
+                    TaskStatus.RETRY_WAIT,
+                ):
+                    task.transition_to(TaskStatus.ASSIGNED)
+
+                if active_state in (
+                    TaskStatus.RUNNING,
+                    TaskStatus.RETRY_WAIT,
+                ):
+                    task.transition_to(TaskStatus.RUNNING)
+
+                if active_state == TaskStatus.RETRY_WAIT:
+                    task.transition_to(TaskStatus.RETRY_WAIT)
+
+                self.assertTrue(task.can_transition_to(TaskStatus.EXPIRED))
+                task.transition_to(TaskStatus.EXPIRED)
+
+                self.assertEqual(task.status, TaskStatus.EXPIRED)
+                self.assertTrue(task.is_terminal)
+                self.assertFalse(task.can_retry)
+
     def test_invalid_transition_raises_error(self):
         task = Task(name="compute")
         with self.assertRaises(InvalidTaskTransitionError):
