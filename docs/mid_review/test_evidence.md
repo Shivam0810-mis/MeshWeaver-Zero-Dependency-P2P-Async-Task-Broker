@@ -273,3 +273,41 @@
 
 **Testing note:** The test results recorded in this document are historical results. No new test execution is claimed as part of this Day 16 update.
 
+
+## 11. Day 17 Test Evidence (25 November 2026)
+
+**Purpose:** Additional tests for malformed task-result messages and expiry lifecycle transitions, followed by full regression testing.
+
+**New tests added:**
+- `tests/test_broker_dispatcher.py`: Added `test_rejects_malformed_and_wrong_peer_task_results`.
+  - Rejects missing, blank and non-string assignment IDs.
+  - Rejects unknown assignment IDs.
+  - Rejects results submitted by a peer other than the assigned peer.
+  - Verifies rejected messages do not alter task or reservation state.
+- `tests/test_broker_models.py`: Added `test_expired_transition_allowed_from_all_active_states`.
+  - Verifies that each active lifecycle state permits transition to `EXPIRED`.
+  - Verifies the resulting task is terminal and cannot be retried.
+
+**Test execution results:**
+
+| Test suite | Result | Status |
+|---|---:|---|
+| `test_broker_dispatcher.py` | 7/7 passed | PASS |
+| `test_broker_models.py` | 9/9 passed | PASS |
+| `test_broker_lifecycle.py` | 12/12 passed | PASS |
+| Full unittest discovery | 79/79 passed | PASS |
+
+**Full-suite execution:** `python -m unittest discover -s tests -v`
+
+**Execution summary:** 79 tests passed in 2.626 seconds, with no failures or errors.
+
+**Testing limitations and outstanding gaps:**
+- Automatic time-based task expiry is not implemented or verified. The added test verifies allowed lifecycle transitions to `EXPIRED`, not automatic expiry based on a deadline or TTL.
+- Result-content/schema validation is not established. The new dispatcher test verifies malformed assignment identifiers and wrong-peer rejection; it does not validate the actual result value or its schema.
+- Further distributed-system testing remains necessary, including real multi-peer TCP communication, network interruption/reconnection and recovery scenarios.
+
+**Code review:** The changes in `tests/test_broker_dispatcher.py` and `tests/test_broker_models.py` were inspected. No other tracked files were modified during this test change. The 14 untracked review snapshot `.txt` files were left untouched.
+
+**Mid-review demonstration:** Pending — the review has not yet taken place.
+
+**Conclusion:** The complete unittest suite passed after the Day 17 test additions. The results verify the current tested behavior only; outstanding implementation gaps are explicitly recorded above.
